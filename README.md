@@ -1,0 +1,2 @@
+# jsoncpp
+Amalgamated jsoncpp code
