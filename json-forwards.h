@@ -115,6 +115,11 @@ license you like.
 #define JSON_USE_EXCEPTION 1
 #endif
 
+// Temporary, tracked for removal with issue #982.
+#ifndef JSON_USE_NULLREF
+#define JSON_USE_NULLREF 1
+#endif
+
 /// If defined, indicates that the source file is amalgamated
 /// to prevent private header inclusion.
 /// Remarks: it is automatically defined in the generated amalgamated header.
@@ -133,6 +138,8 @@ license you like.
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #define JSON_API __declspec(dllexport)
 #define JSONCPP_DISABLE_DLL_INTERFACE_WARNING
+#elif defined(__GNUC__) || defined(__clang__)
+#define JSON_API __attribute__((visibility("default")))
 #endif // if defined(_MSC_VER)
 #elif defined(JSON_DLL)
 #if defined(_MSC_VER) || defined(__MINGW32__)
@@ -182,25 +189,9 @@ msvc_pre1900_c99_snprintf(char* outBuf, size_t size, const char* format, ...);
 #define JSONCPP_OP_EXPLICIT
 #endif
 
-#ifdef __clang__
-#if __has_extension(attribute_deprecated_with_message)
-#define JSONCPP_DEPRECATED(message) __attribute__((deprecated(message)))
-#endif
-#elif defined __GNUC__ // not clang (gcc comes later since clang emulates gcc)
-#if (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 5))
-#define JSONCPP_DEPRECATED(message) __attribute__((deprecated(message)))
-#elif (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 1))
-#define JSONCPP_DEPRECATED(message) __attribute__((__deprecated__))
-#endif // GNUC version
-#elif defined(_MSC_VER) // MSVC (after clang because clang on Windows emulates MSVC)
-#define JSONCPP_DEPRECATED(message) __declspec(deprecated(message))
-#endif // __clang__ || __GNUC__ || _MSC_VER
-
-#if !defined(JSONCPP_DEPRECATED)
-#define JSONCPP_DEPRECATED(message)
-#endif // if !defined(JSONCPP_DEPRECATED)
-
-#if __GNUC__ >= 6
+#if defined(__clang__)
+#define JSON_USE_INT64_DOUBLE_CONVERSION 1
+#elif defined(__GNUC__) && (__GNUC__ >= 6)
 #define JSON_USE_INT64_DOUBLE_CONVERSION 1
 #endif
 
@@ -284,13 +275,19 @@ using JSONCPP_OSTREAM = Json::OStream;
 namespace Json {
 
 // writer.h
+class StreamWriter;
+class StreamWriterBuilder;
+class Writer;
 class FastWriter;
 class StyledWriter;
+class StyledStreamWriter;
 
 // reader.h
 class Reader;
+class CharReader;
+class CharReaderBuilder;
 
-// features.h
+// json_features.h
 class Features;
 
 // value.h
