@@ -301,7 +301,6 @@ Features Features::all() { return {}; }
 Features Features::strictMode() {
   Features features;
   features.allowComments_ = false;
-  features.allowTrailingCommas_ = false;
   features.strictRoot_ = true;
   features.allowDroppedNullPlaceholders_ = false;
   features.allowNumericKeys_ = false;
@@ -689,9 +688,7 @@ bool Reader::readObject(Token& token) {
       initialTokenOk = readToken(tokenName);
     if (!initialTokenOk)
       break;
-    if (tokenName.type_ == tokenObjectEnd &&
-        (name.empty() ||
-         features_.allowTrailingCommas_)) // empty object or trailing comma
+    if (tokenName.type_ == tokenObjectEnd && name.empty()) // empty object
       return true;
     name.clear();
     if (tokenName.type_ == tokenString) {
@@ -739,20 +736,15 @@ bool Reader::readArray(Token& token) {
   Value init(arrayValue);
   currentValue().swapPayload(init);
   currentValue().setOffsetStart(token.start_ - begin_);
+  skipSpaces();
+  if (current_ != end_ && *current_ == ']') // empty array
+  {
+    Token endArray;
+    readToken(endArray);
+    return true;
+  }
   int index = 0;
   for (;;) {
-    skipSpaces();
-    if (current_ != end_ && *current_ == ']' &&
-        (index == 0 ||
-         (features_.allowTrailingCommas_ &&
-          !features_.allowDroppedNullPlaceholders_))) // empty array or trailing
-                                                      // comma
-    {
-      Token endArray;
-      readToken(endArray);
-      return true;
-    }
-
     Value& value = currentValue()[index++];
     nodes_.push(&value);
     bool ok = readValue();
@@ -871,7 +863,7 @@ bool Reader::decodeString(Token& token, String& decoded) {
     Char c = *current++;
     if (c == '"')
       break;
-    else if (c == '\\') {
+    if (c == '\\') {
       if (current == end)
         return addError("Empty escape sequence in string", token, current);
       Char escape = *current++;
@@ -1113,6 +1105,7 @@ public:
   bool failIfExtra_;
   bool rejectDupKeys_;
   bool allowSpecialFloats_;
+  bool skipBom_;
   size_t stackLimit_;
 }; // OurFeatures
 
@@ -1181,6 +1174,7 @@ private:
 
   bool readToken(Token& token);
   void skipSpaces();
+  void skipBom(bool skipBom);
   bool match(const Char* pattern, int patternLength);
   bool readComment();
   bool readCStyleComment(bool* containsNewLineResult);
@@ -1264,6 +1258,8 @@ bool OurReader::parse(const char* beginDoc, const char* endDoc, Value& root,
     nodes_.pop();
   nodes_.push(&root);
 
+  // skip byte order mark if it exists at the beginning of the UTF-8 text.
+  skipBom(features_.skipBom_);
   bool successful = readValue();
   nodes_.pop();
   Token token;
@@ -1510,6 +1506,16 @@ void OurReader::skipSpaces() {
   }
 }
 
+void OurReader::skipBom(bool skipBom) {
+  // The default behavior is to skip BOM.
+  if (skipBom) {
+    if (strncmp(begin_, "\xEF\xBB\xBF", 3) == 0) {
+      begin_ += 3;
+      current_ = begin_;
+    }
+  }
+}
+
 bool OurReader::match(const Char* pattern, int patternLength) {
   if (end_ - current_ < patternLength)
     return false;
@@ -1592,11 +1598,10 @@ bool OurReader::readCStyleComment(bool* containsNewLineResult) {
 
   while ((current_ + 1) < end_) {
     Char c = getNextChar();
-    if (c == '*' && *current_ == '/') {
+    if (c == '*' && *current_ == '/')
       break;
-    } else if (c == '\n') {
+    if (c == '\n')
       *containsNewLineResult = true;
-    }
   }
 
   return getNextChar() == '/';
@@ -1820,9 +1825,9 @@ bool OurReader::decodeNumber(Token& token, Value& decoded) {
   // then take the inverse. This assumes that minLargestInt is only a single
   // power of 10 different in magnitude, which we check above. For the last
   // digit, we take the modulus before negating for the same reason.
-  static constexpr Value::LargestUInt negative_threshold =
+  static constexpr auto negative_threshold =
       Value::LargestUInt(-(Value::minLargestInt / 10));
-  static constexpr Value::UInt negative_last_digit =
+  static constexpr auto negative_last_digit =
       Value::UInt(-(Value::minLargestInt % 10));
 
   const Value::LargestUInt threshold =
@@ -1836,7 +1841,7 @@ bool OurReader::decodeNumber(Token& token, Value& decoded) {
     if (c < '0' || c > '9')
       return decodeDouble(token, decoded);
 
-    const Value::UInt digit(static_cast<Value::UInt>(c - '0'));
+    const auto digit(static_cast<Value::UInt>(c - '0'));
     if (value >= threshold) {
       // We've hit or exceeded the max value divided by 10 (rounded down). If
       // a) we've only just touched the limit, meaing value == threshold,
@@ -1853,7 +1858,7 @@ bool OurReader::decodeNumber(Token& token, Value& decoded) {
 
   if (isNegative) {
     // We use the same magnitude assumption here, just in case.
-    const Value::UInt last_digit = static_cast<Value::UInt>(value % 10);
+    const auto last_digit = static_cast<Value::UInt>(value % 10);
     decoded = -Value::LargestInt(value / 10) * 10 - last_digit;
   } else if (value <= Value::LargestUInt(Value::maxLargestInt)) {
     decoded = Value::LargestInt(value);
@@ -1903,9 +1908,9 @@ bool OurReader::decodeString(Token& token, String& decoded) {
   Location end = token.end_ - 1;       // do not include '"'
   while (current != end) {
     Char c = *current++;
-    if (c == '"') {
+    if (c == '"')
       break;
-    } else if (c == '\\') {
+    if (c == '\\') {
       if (current == end)
         return addError("Empty escape sequence in string", token, current);
       Char escape = *current++;
@@ -2128,6 +2133,7 @@ CharReader* CharReaderBuilder::newCharReader() const {
   features.failIfExtra_ = settings_["failIfExtra"].asBool();
   features.rejectDupKeys_ = settings_["rejectDupKeys"].asBool();
   features.allowSpecialFloats_ = settings_["allowSpecialFloats"].asBool();
+  features.skipBom_ = settings_["skipBom"].asBool();
   return new OurCharReader(collectComments, features);
 }
 static void getValidReaderKeys(std::set<String>* valid_keys) {
@@ -2143,6 +2149,7 @@ static void getValidReaderKeys(std::set<String>* valid_keys) {
   valid_keys->insert("failIfExtra");
   valid_keys->insert("rejectDupKeys");
   valid_keys->insert("allowSpecialFloats");
+  valid_keys->insert("skipBom");
 }
 bool CharReaderBuilder::validate(Json::Value* invalid) const {
   Json::Value my_invalid;
@@ -2177,6 +2184,7 @@ void CharReaderBuilder::strictMode(Json::Value* settings) {
   (*settings)["failIfExtra"] = true;
   (*settings)["rejectDupKeys"] = true;
   (*settings)["allowSpecialFloats"] = false;
+  (*settings)["skipBom"] = true;
   //! [CharReaderBuilderStrictMode]
 }
 // static
@@ -2193,6 +2201,7 @@ void CharReaderBuilder::setDefaults(Json::Value* settings) {
   (*settings)["failIfExtra"] = false;
   (*settings)["rejectDupKeys"] = false;
   (*settings)["allowSpecialFloats"] = false;
+  (*settings)["skipBom"] = true;
   //! [CharReaderBuilderDefaults]
 }
 
@@ -2421,6 +2430,7 @@ ValueIterator& ValueIterator::operator=(const SelfType& other) {
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <iostream>
 #include <sstream>
 #include <utility>
 
@@ -2608,8 +2618,8 @@ namespace Json {
 
 #if JSON_USE_EXCEPTION
 Exception::Exception(String msg) : msg_(std::move(msg)) {}
-Exception::~Exception() JSONCPP_NOEXCEPT = default;
-char const* Exception::what() const JSONCPP_NOEXCEPT { return msg_.c_str(); }
+Exception::~Exception() noexcept = default;
+char const* Exception::what() const noexcept { return msg_.c_str(); }
 RuntimeError::RuntimeError(String const& msg) : Exception(msg) {}
 LogicError::LogicError(String const& msg) : Exception(msg) {}
 JSONCPP_NORETURN void throwRuntimeError(String const& msg) {
@@ -2619,8 +2629,14 @@ JSONCPP_NORETURN void throwLogicError(String const& msg) {
   throw LogicError(msg);
 }
 #else // !JSON_USE_EXCEPTION
-JSONCPP_NORETURN void throwRuntimeError(String const& msg) { abort(); }
-JSONCPP_NORETURN void throwLogicError(String const& msg) { abort(); }
+JSONCPP_NORETURN void throwRuntimeError(String const& msg) {
+  std::cerr << msg << std::endl;
+  abort();
+}
+JSONCPP_NORETURN void throwLogicError(String const& msg) {
+  std::cerr << msg << std::endl;
+  abort();
+}
 #endif
 
 // //////////////////////////////////////////////////////////////////
@@ -3283,8 +3299,7 @@ ArrayIndex Value::size() const {
 bool Value::empty() const {
   if (isNull() || isArray() || isObject())
     return size() == 0U;
-  else
-    return false;
+  return false;
 }
 
 Value::operator bool() const { return !isNull(); }
@@ -3545,13 +3560,12 @@ bool Value::insert(ArrayIndex index, Value&& newValue) {
   ArrayIndex length = size();
   if (index > length) {
     return false;
-  } else {
-    for (ArrayIndex i = length; i > index; i--) {
-      (*this)[i] = std::move((*this)[i - 1]);
-    }
-    (*this)[index] = std::move(newValue);
-    return true;
   }
+  for (ArrayIndex i = length; i > index; i--) {
+    (*this)[i] = std::move((*this)[i - 1]);
+  }
+  (*this)[index] = std::move(newValue);
+  return true;
 }
 
 Value Value::get(char const* begin, char const* end,
